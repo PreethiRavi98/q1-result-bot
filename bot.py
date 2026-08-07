@@ -1,0 +1,218 @@
+import os
+import re
+from datetime import datetime, timedelta, date
+
+import requests
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+NSE_BASE = "https://www.nseindia.com"
+NSE_ANNOUNCEMENTS = f"{NSE_BASE}/api/corporate-announcements"
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+NSE_DISCLAIMER = "\n_Source: NSE India. For informational purposes only._"
+
+_session = None
+
+
+def nse_session():
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update(NSE_HEADERS)
+        _session.get(NSE_BASE, timeout=15)
+    return _session
+
+
+_MONTHS = {name: i for i, name in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _parse_date(text):
+    patterns = [
+        (r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\s*,?\s*(\d{4})\b", "dmy"),
+        (r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\b", "dm"),
+        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(\d{4})\b", "mdy"),
+    ]
+    for pat, kind in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if not m:
+            continue
+        if kind == "mdy":
+            mon, day, year = m.group(1), int(m.group(2)), m.group(3)
+        else:
+            day, mon = int(m.group(1)), m.group(2)
+            year = m.group(3) if len(m.groups()) == 3 else None
+        month = _MONTHS.get(mon[:3].lower())
+        if not month:
+            continue
+        if not year:
+            now = datetime.now()
+            candidate = date(now.year, month, day)
+            if candidate < now.date() - timedelta(days=120):
+                candidate = date(now.year + 1, month, day)
+            return candidate
+        try:
+            return date(int(year), month, day)
+        except ValueError:
+            continue
+    return None
+
+
+def fetch_announcements(from_date, to_date):
+    params = {
+        "index": "equities",
+        "from_date": from_date.strftime("%d-%m-%Y"),
+        "to_date": to_date.strftime("%d-%m-%Y"),
+    }
+    r = nse_session().get(NSE_ANNOUNCEMENTS, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def is_financial_result(item):
+    text = item.get("attchmntText", "") or ""
+    low = text.lower()
+    result_terms = [
+        "financial result",
+        "unaudited financial",
+        "audited financial",
+        "quarter ended",
+        "results for the quarter",
+        "results of the company for the quarter",
+        "standalone and consolidated financial",
+    ]
+    if not any(t in low for t in result_terms):
+        return False
+    exclude_terms = [
+        "newspaper publication",
+        "earnings call",
+        "audio recording",
+        "press release",
+        "annual general meeting",
+        "agm",
+        "update on",
+        "corrigendum",
+        "revised",
+        "scrutinizer",
+    ]
+    if any(t in low for t in exclude_terms):
+        return False
+    return True
+
+
+def is_upcoming_result(item):
+    text = item.get("attchmntText", "") or ""
+    low = text.lower()
+    if "result" not in low and "financial" not in low:
+        return False
+    if any(x in low for x in ["outcome", "held today", "held earlier",
+                              "conference", "earnings call", "press release",
+                              "newspaper publication", "corrigendum", "revised",
+                              "webcast", "audio recording", "analyst meet",
+                              "investor meet", "investors meet", "schedule of investor",
+                              "annual general meeting", "agm", "shareholders meeting"]):
+        return False
+    if not any(x in low for x in ["board meeting", "intimation", "to be held",
+                                  "scheduled", "will be held", "to consider and approve"]):
+        return False
+    meeting = _parse_date(text)
+    if meeting is None or meeting < date.today():
+        return False
+    return True
+
+
+MAX_ITEMS = 40
+MAX_CHARS = 3800
+
+
+def format_results(items, heading):
+    lines = [heading]
+    seen = set()
+    for item in items:
+        sym = item.get("symbol")
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        text = item.get("attchmntText", "")
+        m = re.search(r"(?:approved|considered|submitted to the Exchange,? )?(.{0,140}?(?:Financial Results?|financial results?)[^.]*\.)", text, re.IGNORECASE)
+        summary = m.group(1).strip() if m else text[:180]
+        lines.append(f"\n*{sym}*")
+        lines.append(summary)
+        if len(seen) >= MAX_ITEMS or len("\n".join(lines)) > MAX_CHARS:
+            lines.append(f"\n_... and {len(items) - len(seen)} more companies._")
+            break
+    return "\n".join(lines)
+
+
+def format_upcoming(items, heading):
+    lines = [heading]
+    seen = set()
+    for item in items:
+        sym = item.get("symbol")
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        text = item.get("attchmntText", "")
+        meeting = _parse_date(text)
+        when = f" on {meeting:%d %b %Y}" if meeting else ""
+        lines.append(f"\n*{sym}*{when}")
+        lines.append(text[:180])
+        if len(seen) >= MAX_ITEMS or len("\n".join(lines)) > MAX_CHARS:
+            lines.append(f"\n_... and {len(items) - len(seen)} more companies._")
+            break
+    return "\n".join(lines)
+
+
+async def cmd_q1(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now().date()
+    try:
+        ann = fetch_announcements(today, today)
+    except Exception as exc:
+        await update.message.reply_text(f"NSE fetch failed: {exc}")
+        return
+    results = [i for i in ann if is_financial_result(i)]
+    if not results:
+        await update.message.reply_text("No Q1 result announcements found for today on NSE yet.")
+        return
+    msg = format_results(results, f"*Q1 Results announced today ({today:%d %b %Y})*")
+    await update.message.reply_text(msg + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+
+async def cmd_upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now().date()
+    try:
+        ann = fetch_announcements(today - timedelta(days=15), today + timedelta(days=30))
+    except Exception as exc:
+        await update.message.reply_text(f"NSE fetch failed: {exc}")
+        return
+    results = [i for i in ann if is_upcoming_result(i)]
+    if not results:
+        await update.message.reply_text("No upcoming Q1 result board meetings found on NSE.")
+        return
+    results.sort(key=lambda i: (_parse_date(i.get("attchmntText", "")) or date.max))
+    msg = format_upcoming(results, "*Upcoming Q1 Results (board meetings yet to be held)*")
+    await update.message.reply_text(msg + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+
+def main():
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN environment variable not set")
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text(
+        "Hello! I report Q1 (April-June quarter) results from NSE.\n"
+        "/q1 - today's Q1 result announcements\n"
+        "/upcoming - upcoming Q1 result board meetings")))
+    app.add_handler(CommandHandler("q1", cmd_q1))
+    app.add_handler(CommandHandler("upcoming", cmd_upcoming))
+    print("Bot started. Polling for updates...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
