@@ -1,6 +1,7 @@
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, date
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -175,6 +176,9 @@ LOSERS_COUNT = 15
 YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1"))
+NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
+
 
 def fetch_yahoo_quote(symbol):
     r = requests.get(
@@ -226,6 +230,50 @@ async def cmd_losers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
+_seen_seq_ids = set()
+
+
+def _announcement_key(item):
+    return item.get("seq_id") or f"{item.get('symbol')}|{item.get('an_dt')}"
+
+
+def _send_telegram(token, chat_id, text):
+    requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown",
+              "disable_web_page_preview": True},
+        timeout=20,
+    ).raise_for_status()
+
+
+def monitor_loop(token):
+    if not NOTIFY_CHAT_ID:
+        print("NOTIFY_CHAT_ID not set; monitor disabled.")
+        return
+    print(f"Monitor running: poll every {POLL_INTERVAL}s, notify {NOTIFY_CHAT_ID}")
+    while True:
+        started = time.monotonic()
+        try:
+            today = datetime.now().date()
+            ann = fetch_announcements(today, today)
+            for item in ann:
+                if not is_financial_result(item):
+                    continue
+                key = _announcement_key(item)
+                if key in _seen_seq_ids:
+                    continue
+                _seen_seq_ids.add(key)
+                sym = item.get("symbol")
+                text = (item.get("attchmntText") or "")[:200]
+                msg = f"*New Q1 result: {sym}*\n{text}{NSE_DISCLAIMER}"
+                _send_telegram(token, NOTIFY_CHAT_ID, msg)
+                print(f"Notified {sym} ({item.get('an_dt')})")
+        except Exception as exc:
+            print(f"Monitor poll error: {exc}")
+        elapsed = time.monotonic() - started
+        time.sleep(max(0.0, POLL_INTERVAL - elapsed))
+
+
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -273,6 +321,13 @@ async def cmd_upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
+async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Your chat ID is `{update.effective_chat.id}`. "
+        f"Set `NOTIFY_CHAT_ID` to it to receive auto-pushes.",
+        parse_mode=ParseMode.MARKDOWN)
+
+
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -282,11 +337,14 @@ def main():
         "Hello! I report Q1 (April-June quarter) results from NSE.\n"
         "/q1 - today's Q1 result announcements\n"
         "/upcoming - upcoming Q1 result board meetings\n"
-        "/losers - Q1-result companies trading down today")))
+        "/losers - Q1-result companies trading down today\n"
+        "/chatid - show your chat ID for auto-notifications")))
     app.add_handler(CommandHandler("q1", cmd_q1))
     app.add_handler(CommandHandler("upcoming", cmd_upcoming))
     app.add_handler(CommandHandler("losers", cmd_losers))
+    app.add_handler(CommandHandler("chatid", cmd_chatid))
     start_health_server()
+    threading.Thread(target=monitor_loop, args=(token,), daemon=True).start()
     print("Bot started. Polling for updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

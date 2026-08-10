@@ -7,6 +7,21 @@ A Telegram bot that reports Q1 (April-June quarter) results from NSE India.
 - `/q1` - Q1 financial results announced today on NSE
 - `/upcoming` - Upcoming Q1 result board meetings (dates yet to be held)
 - `/losers` - Q1-result companies trading down today (prices via Yahoo Finance)
+- `/chatid` - show your chat ID to use with auto-notifications
+
+## Auto-notifications (push on new results)
+
+The bot continuously polls NSE (every `POLL_INTERVAL` seconds, default 1) and
+pushes each new financial-result announcement to one chat.
+
+- Set `NOTIFY_CHAT_ID` to your chat ID (get it with `/chatid`).
+- `POLL_INTERVAL` controls the poll frequency (default `1` second).
+- Already-seen announcements are tracked by NSE `seq_id`; a restart re-seeds
+  today's list so old results aren't re-sent.
+
+> Caution: NSE may rate-limit or block aggressive polling. 1s polling issues
+> ~86k requests/day; keep `POLL_INTERVAL` reasonable (e.g. 30-60) unless
+> necessary.
 
 ## Local setup
 
@@ -59,7 +74,8 @@ It is free but has gaps between runs; use it only as a fallback.
 1. At https://render.com -> "New" -> "Blueprint" -> connect the repo (or
    "Web Service"). The `render.yaml` blueprint defines the free web service.
 2. Add the `TELEGRAM_BOT_TOKEN` environment variable.
-3. After deploy, Render gives the app a URL like `https://q1-result-bot.onrender.com`.
+3. (Optional) Add `NOTIFY_CHAT_ID` for auto-push of new results.
+4. After deploy, Render gives the app a URL like `https://q1-result-bot.onrender.com`.
 
 Render free web services spin down after 15 min without inbound traffic. The
 included GitHub Actions workflow (`.github/workflows/bot.yml`) pings the app
