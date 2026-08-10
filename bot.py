@@ -1,6 +1,9 @@
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, date
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 from telegram import Update
@@ -168,6 +171,77 @@ def format_upcoming(items, heading):
     return "\n".join(lines)
 
 
+LOSERS_COUNT = 15
+YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+
+def fetch_yahoo_quote(symbol):
+    r = requests.get(
+        f"{YAHOO_BASE}/{symbol}.NS",
+        params={"range": "1d", "interval": "1d", "includePrePost": "false"},
+        headers=YAHOO_HEADERS,
+        timeout=20,
+    )
+    r.raise_for_status()
+    result = r.json().get("chart", {}).get("result")
+    if not result:
+        return None, None
+    meta = result[0].get("meta", {})
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    if not price or not prev:
+        return None, None
+    return price, (price - prev) / prev * 100
+
+
+async def cmd_losers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now().date()
+    try:
+        ann = fetch_announcements(today, today)
+    except Exception as exc:
+        await update.message.reply_text(f"NSE fetch failed: {exc}")
+        return
+    symbols = sorted({i.get("symbol") for i in ann if is_financial_result(i)})[:LOSERS_COUNT * 3]
+    if not symbols:
+        await update.message.reply_text("No Q1 result announcements found for today on NSE yet.")
+        return
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        quotes = dict(zip(symbols, pool.map(fetch_yahoo_quote, symbols)))
+    rows = []
+    for sym in symbols:
+        price, pct = quotes[sym]
+        if price is None or pct >= 0:
+            continue
+        rows.append((pct, sym, price))
+    if not rows:
+        await update.message.reply_text("No Q1-result companies are trading down today.")
+        return
+    rows.sort()
+    lines = [f"*Q1-result losers ({today:%d %b %Y})*"]
+    for pct, sym, price in rows[:LOSERS_COUNT]:
+        lines.append(f"\n*{sym}*  Rs {price:,.2f}  ({pct:+.2f}%)")
+    if len(rows) > LOSERS_COUNT:
+        lines.append(f"\n_... and {len(rows) - LOSERS_COUNT} more companies._")
+    await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):
+        pass
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "8000"))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
 async def cmd_q1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().date()
     try:
@@ -207,9 +281,12 @@ def main():
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text(
         "Hello! I report Q1 (April-June quarter) results from NSE.\n"
         "/q1 - today's Q1 result announcements\n"
-        "/upcoming - upcoming Q1 result board meetings")))
+        "/upcoming - upcoming Q1 result board meetings\n"
+        "/losers - Q1-result companies trading down today")))
     app.add_handler(CommandHandler("q1", cmd_q1))
     app.add_handler(CommandHandler("upcoming", cmd_upcoming))
+    app.add_handler(CommandHandler("losers", cmd_losers))
+    start_health_server()
     print("Bot started. Polling for updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
