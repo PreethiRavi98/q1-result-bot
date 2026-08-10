@@ -229,9 +229,24 @@ async def cmd_losers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
-VOLUME_BREAKOUTS = 15
-NEWS_MOVERS = 15
+VOLUME_BREAKOUTS = 100
+NEWS_MOVERS = 100
 SCAN_WORKERS = 40
+MAX_MSG_CHARS = 4000
+
+
+async def _reply_chunks(update, text, parse_mode=None):
+    lines = text.split("\n")
+    buf = ""
+    for line in lines:
+        if len(buf) + len(line) + 1 > MAX_MSG_CHARS and buf:
+            await update.message.reply_text(buf, parse_mode=parse_mode,
+                                            disable_web_page_preview=True)
+            buf = ""
+        buf += line + "\n"
+    if buf:
+        await update.message.reply_text(buf, parse_mode=parse_mode,
+                                        disable_web_page_preview=True)
 
 
 def fetch_yahoo_history(symbol):
@@ -295,9 +310,7 @@ async def cmd_volume_breakout(update: Update, context: ContextTypes.DEFAULT_TYPE
         lines.append(f"\n*{sym}*  {tag}  vol={vol:,}  ({pct:+.2f}%)")
     if len(found) > VOLUME_BREAKOUTS:
         lines.append(f"\n_... and {len(found) - VOLUME_BREAKOUTS} more stocks._")
-    await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER,
-                                    parse_mode=ParseMode.MARKDOWN,
-                                    disable_web_page_preview=True)
+    await _reply_chunks(update, "\n".join(lines) + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN)
 
 
 def _quote_metrics(symbol):
@@ -351,9 +364,7 @@ async def cmd_news_mover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"\n*{sym}*  Rs {price:,.2f}  ({pct:+.2f}%)")
     if len(rows) > NEWS_MOVERS:
         lines.append(f"\n_... and {len(rows) - NEWS_MOVERS} more stocks._")
-    await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER,
-                                    parse_mode=ParseMode.MARKDOWN,
-                                    disable_web_page_preview=True)
+    await _reply_chunks(update, "\n".join(lines) + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN)
 
 
 _seen_seq_ids = set()
