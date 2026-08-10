@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, date
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
@@ -33,41 +33,6 @@ def nse_session():
         _session.headers.update(NSE_HEADERS)
         _session.get(NSE_BASE, timeout=15)
     return _session
-
-
-_MONTHS = {name: i for i, name in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
-
-
-def _parse_date(text):
-    patterns = [
-        (r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\s*,?\s*(\d{4})\b", "dmy"),
-        (r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\b", "dm"),
-        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(\d{4})\b", "mdy"),
-    ]
-    for pat, kind in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if not m:
-            continue
-        if kind == "mdy":
-            mon, day, year = m.group(1), int(m.group(2)), m.group(3)
-        else:
-            day, mon = int(m.group(1)), m.group(2)
-            year = m.group(3) if len(m.groups()) == 3 else None
-        month = _MONTHS.get(mon[:3].lower())
-        if not month:
-            continue
-        if not year:
-            now = datetime.now()
-            candidate = date(now.year, month, day)
-            if candidate < now.date() - timedelta(days=120):
-                candidate = date(now.year + 1, month, day)
-            return candidate
-        try:
-            return date(int(year), month, day)
-        except ValueError:
-            continue
-    return None
 
 
 def fetch_announcements(from_date, to_date):
@@ -110,69 +75,6 @@ def is_financial_result(item):
     if any(t in low for t in exclude_terms):
         return False
     return True
-
-
-def is_upcoming_result(item):
-    text = item.get("attchmntText", "") or ""
-    low = text.lower()
-    if "result" not in low and "financial" not in low:
-        return False
-    if any(x in low for x in ["outcome", "held today", "held earlier",
-                              "conference", "earnings call", "press release",
-                              "newspaper publication", "corrigendum", "revised",
-                              "webcast", "audio recording", "analyst meet",
-                              "investor meet", "investors meet", "schedule of investor",
-                              "annual general meeting", "agm", "shareholders meeting"]):
-        return False
-    if not any(x in low for x in ["board meeting", "intimation", "to be held",
-                                  "scheduled", "will be held", "to consider and approve"]):
-        return False
-    meeting = _parse_date(text)
-    if meeting is None or meeting < date.today():
-        return False
-    return True
-
-
-MAX_ITEMS = 40
-MAX_CHARS = 3800
-
-
-def format_results(items, heading):
-    lines = [heading]
-    seen = set()
-    for item in items:
-        sym = item.get("symbol")
-        if not sym or sym in seen:
-            continue
-        seen.add(sym)
-        text = item.get("attchmntText", "")
-        m = re.search(r"(?:approved|considered|submitted to the Exchange,? )?(.{0,140}?(?:Financial Results?|financial results?)[^.]*\.)", text, re.IGNORECASE)
-        summary = m.group(1).strip() if m else text[:180]
-        lines.append(f"\n*{sym}*")
-        lines.append(summary)
-        if len(seen) >= MAX_ITEMS or len("\n".join(lines)) > MAX_CHARS:
-            lines.append(f"\n_... and {len(items) - len(seen)} more companies._")
-            break
-    return "\n".join(lines)
-
-
-def format_upcoming(items, heading):
-    lines = [heading]
-    seen = set()
-    for item in items:
-        sym = item.get("symbol")
-        if not sym or sym in seen:
-            continue
-        seen.add(sym)
-        text = item.get("attchmntText", "")
-        meeting = _parse_date(text)
-        when = f" on {meeting:%d %b %Y}" if meeting else ""
-        lines.append(f"\n*{sym}*{when}")
-        lines.append(text[:180])
-        if len(seen) >= MAX_ITEMS or len("\n".join(lines)) > MAX_CHARS:
-            lines.append(f"\n_... and {len(items) - len(seen)} more companies._")
-            break
-    return "\n".join(lines)
 
 
 LOSERS_COUNT = 15
@@ -389,37 +291,6 @@ def start_health_server():
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
-async def cmd_q1(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().date()
-    try:
-        ann = fetch_announcements(today, today)
-    except Exception as exc:
-        await update.message.reply_text(f"NSE fetch failed: {exc}")
-        return
-    results = [i for i in ann if is_financial_result(i)]
-    if not results:
-        await update.message.reply_text("No Q1 result announcements found for today on NSE yet.")
-        return
-    msg = format_results(results, f"*Q1 Results announced today ({today:%d %b %Y})*")
-    await update.message.reply_text(msg + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
-
-
-async def cmd_upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().date()
-    try:
-        ann = fetch_announcements(today - timedelta(days=15), today + timedelta(days=30))
-    except Exception as exc:
-        await update.message.reply_text(f"NSE fetch failed: {exc}")
-        return
-    results = [i for i in ann if is_upcoming_result(i)]
-    if not results:
-        await update.message.reply_text("No upcoming Q1 result board meetings found on NSE.")
-        return
-    results.sort(key=lambda i: (_parse_date(i.get("attchmntText", "")) or date.max))
-    msg = format_upcoming(results, "*Upcoming Q1 Results (board meetings yet to be held)*")
-    await update.message.reply_text(msg + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
-
-
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Your chat ID is `{update.effective_chat.id}`. "
@@ -483,15 +354,11 @@ def main():
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text(
         "Hello! I report Q1 (April-June quarter) results from NSE.\n"
-        "/q1 - today's Q1 result announcements\n"
-        "/upcoming - upcoming Q1 result board meetings\n"
         "/losers - Q1-result companies trading down today\n"
         "/add SYMBOL - watch a stock for Q1 result alerts\n"
         "/remove SYMBOL - stop watching a stock\n"
         "/watchlist - show your watched stocks\n"
         "/chatid - show your chat ID for auto-notifications")))
-    app.add_handler(CommandHandler("q1", cmd_q1))
-    app.add_handler(CommandHandler("upcoming", cmd_upcoming))
     app.add_handler(CommandHandler("losers", cmd_losers))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("add", cmd_add))

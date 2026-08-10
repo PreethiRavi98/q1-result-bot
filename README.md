@@ -4,8 +4,6 @@ A Telegram bot that reports Q1 (April-June quarter) results from NSE India.
 
 ## Commands
 
-- `/q1` - Q1 financial results announced today on NSE
-- `/upcoming` - Upcoming Q1 result board meetings (dates yet to be held)
 - `/losers` - Q1-result companies trading down today (prices via Yahoo Finance)
 - `/add SYMBOL or Company Name` - watch a stock (e.g. `/add Infosys` or `/add INFY`); you'll be alerted when it announces Q1 results
 - `/remove SYMBOL` - stop watching a stock
