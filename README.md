@@ -32,19 +32,22 @@ free instance.
 
 ### Koyeb (free, always-on)
 
-1. Push this code to GitHub.
-2. Sign up at https://app.koyeb.com and log in.
-3. **Create App** -> **GitHub** and connect your repo (Koyeb auto-detects the
-   `Dockerfile`).
-4. Add the environment variable `TELEGRAM_BOT_TOKEN`.
-5. Deploy. A health server on port `8000` keeps the service marked healthy.
+[![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=git&builder=dockerfile&repository=github.com/PreethiRavi98/q1-result-bot&branch=main&name=q1-result-bot&ports=8000;http;/)
 
-The free instance (512MB RAM, 0.1 vCPU) runs the bot 24/7 with auto-restart on
-crash.
+1. Click the button above (or sign up at https://app.koyeb.com and create an
+   app from the GitHub repo).
+2. Select the **free** instance type.
+3. Add the environment variable `TELEGRAM_BOT_TOKEN`.
+4. Deploy. A health server on port `8000` keeps the service marked healthy.
+
+The free instance (512MB RAM, 0.1 vCPU) restarts the bot on crash.
 
 > Important: only ONE instance may poll the bot at a time (Telegram returns
 > `409 Conflict` otherwise). Once Koyeb is live, disable the GitHub Actions
 > workflow in the repo's **Actions** tab.
+>
+> Note: Koyeb free instances scale to zero after ~1h without incoming traffic.
+> If the bot goes quiet, wake it by opening the app URL once.
 
 ### GitHub Actions (fallback, not continuous)
 
