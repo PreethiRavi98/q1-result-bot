@@ -54,14 +54,17 @@ The free instance (512MB RAM, 0.1 vCPU) restarts the bot on crash.
 A workflow (`.github/workflows/bot.yml`) runs the bot in ~2h windows via cron.
 It is free but has gaps between runs; use it only as a fallback.
 
-### Render
+### Render (free, web service)
 
-1. Push the code to GitHub.
-2. At https://render.com -> "New" -> "Background Worker" -> connect the repo
-   (or use the `render.yaml` blueprint).
-3. Add the `TELEGRAM_BOT_TOKEN` environment variable.
-4. Free tier workers spin down after ~15 min of inactivity; **Starter+** keeps
-   it running 24/7.
+1. At https://render.com -> "New" -> "Blueprint" -> connect the repo (or
+   "Web Service"). The `render.yaml` blueprint defines the free web service.
+2. Add the `TELEGRAM_BOT_TOKEN` environment variable.
+3. After deploy, Render gives the app a URL like `https://q1-result-bot.onrender.com`.
+
+Render free web services spin down after 15 min without inbound traffic. The
+included GitHub Actions workflow (`.github/workflows/bot.yml`) pings the app
+every 10 min to keep it awake. Set the app URL as a repository **variable**
+named `RENDER_APP_URL` (Settings -> Secrets and variables -> Actions -> Variables).
 
 ## Notes
 
