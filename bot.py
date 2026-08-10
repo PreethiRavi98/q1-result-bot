@@ -229,6 +229,133 @@ async def cmd_losers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
+VOLUME_BREAKOUTS = 15
+NEWS_MOVERS = 15
+SCAN_WORKERS = 40
+
+
+def fetch_yahoo_history(symbol):
+    r = requests.get(
+        f"{YAHOO_BASE}/{symbol}.NS",
+        params={"range": "1mo", "interval": "1d", "includePrePost": "false"},
+        headers=YAHOO_HEADERS,
+        timeout=20,
+    )
+    if r.status_code != 200:
+        return None
+    result = r.json().get("chart", {}).get("result")
+    if not result:
+        return None
+    quote = result[0].get("indicators", {}).get("quote", [{}])[0]
+    return quote.get("close") or [], quote.get("volume") or []
+
+
+def volume_breakout_score(closes, volumes):
+    vols = [v for v in volumes if v]
+    if len(vols) < 21:
+        return None
+    today_vol = vols[-1]
+    avg10 = sum(vols[-11:-1]) / 10
+    avg20 = sum(vols[-21:-1]) / 20
+    ratio10 = today_vol / avg10 if avg10 else 0
+    ratio20 = today_vol / avg20 if avg20 else 0
+    if ratio10 >= 2 or ratio20 >= 5:
+        prev = closes[-2] if len(closes) > 1 and closes[-2] else None
+        pct = (closes[-1] - prev) / prev * 100 if prev else 0.0
+        return ratio10, ratio20, today_vol, pct
+    return None
+
+
+async def cmd_volume_breakout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Scanning all NSE stocks for volume breakouts...")
+    try:
+        mapping = load_equity_map()
+        symbols = sorted({c[0] for c in mapping["companies"]})
+    except Exception as exc:
+        await update.message.reply_text(f"Failed to load equity list: {exc}")
+        return
+    found = []
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        futures = {sym: pool.submit(fetch_yahoo_history, sym) for sym in symbols}
+        for sym, fut in futures.items():
+            try:
+                closes, volumes = fut.result()
+            except Exception:
+                continue
+            score = volume_breakout_score(closes, volumes)
+            if score:
+                found.append((sym, *score))
+    if not found:
+        await update.message.reply_text("No volume breakouts found today.")
+        return
+    found.sort(key=lambda x: max(x[1], x[2]), reverse=True)
+    lines = [f"*Volume breakouts (2x/10d or 5x/20d) - top {VOLUME_BREAKOUTS}*"]
+    for sym, r10, r20, vol, pct in found[:VOLUME_BREAKOUTS]:
+        tag = f"10d={r10:.1f}x" if r10 >= 2 else f"20d={r20:.1f}x"
+        lines.append(f"\n*{sym}*  {tag}  vol={vol:,}  ({pct:+.2f}%)")
+    if len(found) > VOLUME_BREAKOUTS:
+        lines.append(f"\n_... and {len(found) - VOLUME_BREAKOUTS} more stocks._")
+    await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER,
+                                    parse_mode=ParseMode.MARKDOWN,
+                                    disable_web_page_preview=True)
+
+
+def _quote_metrics(symbol):
+    price, pct = fetch_yahoo_quote(symbol)
+    return symbol, price, pct
+
+
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [a.lower() for a in context.args]
+    if args and args[0] == "mover":
+        args = args[1:]
+    context.args = args
+    await cmd_news_mover(update, context)
+
+
+async def cmd_news_mover(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = [a.lower() for a in context.args]
+    direction = args[0] if args else "down"
+    if direction not in ("up", "down"):
+        await update.message.reply_text("Usage: /newsmover up|down")
+        return
+    today = datetime.now().date()
+    try:
+        ann = fetch_announcements(today, today)
+    except Exception as exc:
+        await update.message.reply_text(f"NSE fetch failed: {exc}")
+        return
+    symbols = sorted({i.get("symbol") for i in ann if i.get("symbol")})[:NEWS_MOVERS * 20]
+    if not symbols:
+        await update.message.reply_text("No announcements found for today on NSE yet.")
+        return
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        quotes = dict(pool.map(_quote_metrics, symbols))
+    rows = []
+    for sym in symbols:
+        price, pct = quotes[sym]
+        if price is None:
+            continue
+        if direction == "up" and 5 <= pct <= 10:
+            rows.append((pct, sym, price))
+        elif direction == "down" and -10 <= pct <= -5:
+            rows.append((pct, sym, price))
+    if not rows:
+        await update.message.reply_text(
+            f"No stocks with announcements moved {5}-{10}% {direction} today.")
+        return
+    rows.sort(reverse=(direction == "up"))
+    label = "UP" if direction == "up" else "DOWN"
+    lines = [f"*News movers {label} {5}-{10}% ({today:%d %b %Y})*"]
+    for pct, sym, price in rows[:NEWS_MOVERS]:
+        lines.append(f"\n*{sym}*  Rs {price:,.2f}  ({pct:+.2f}%)")
+    if len(rows) > NEWS_MOVERS:
+        lines.append(f"\n_... and {len(rows) - NEWS_MOVERS} more stocks._")
+    await update.message.reply_text("\n".join(lines) + NSE_DISCLAIMER,
+                                    parse_mode=ParseMode.MARKDOWN,
+                                    disable_web_page_preview=True)
+
+
 _seen_seq_ids = set()
 
 
@@ -355,11 +482,16 @@ def main():
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text(
         "Hello! I report Q1 (April-June quarter) results from NSE.\n"
         "/losers - Q1-result companies trading down today\n"
+        "/volume - NSE stocks with 2x/10d or 5x/20d volume breakouts\n"
+        "/newsmover up|down - stocks moving 5-10% on news/announcements\n"
         "/add SYMBOL - watch a stock for Q1 result alerts\n"
         "/remove SYMBOL - stop watching a stock\n"
         "/watchlist - show your watched stocks\n"
         "/chatid - show your chat ID for auto-notifications")))
     app.add_handler(CommandHandler("losers", cmd_losers))
+    app.add_handler(CommandHandler("volume", cmd_volume_breakout))
+    app.add_handler(CommandHandler("newsmover", cmd_news_mover))
+    app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
