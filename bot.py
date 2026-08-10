@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import os
 import re
@@ -182,8 +184,6 @@ NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
 
 WATCHLIST_FILE = os.getenv("WATCHLIST_FILE", "watchlist.json")
 _watchlist_lock = threading.Lock()
-
-
 def load_watchlist():
     try:
         with open(WATCHLIST_FILE) as f:
@@ -203,6 +203,78 @@ _watchlist = load_watchlist()
 def is_watched(symbol):
     with _watchlist_lock:
         return symbol in _watchlist
+
+
+EQUITY_MASTER_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+_equity_map = {}
+_equity_lock = threading.Lock()
+
+
+def _normalise(text):
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def load_equity_map():
+    global _equity_map
+    r = nse_session().get(EQUITY_MASTER_URL, timeout=60)
+    r.raise_for_status()
+    reader = csv.DictReader(io.StringIO(r.content.decode("utf-8-sig")))
+    mapping = {"symbols": {}, "names": {}, "tokens": {}, "companies": []}
+    for row in reader:
+        sym = (row.get("SYMBOL") or "").strip().upper()
+        name = (row.get("NAME OF COMPANY") or "").strip()
+        if not sym or not name:
+            continue
+        norm_name = _normalise(name)
+        tokens = re.findall(r"[a-z0-9]+", name.lower())
+        mapping["symbols"].setdefault(_normalise(sym), sym)
+        mapping["names"].setdefault(norm_name, sym)
+        for tok in tokens:
+            mapping["tokens"].setdefault(tok, []).append(sym)
+        mapping["companies"].append((sym, name, norm_name, tokens))
+    with _equity_lock:
+        _equity_map = mapping
+    return mapping
+
+
+_IGNORED_WORDS = {"ltd", "limited", "pvt", "private", "plc", "co", "the"}
+
+
+def resolve_symbol(query):
+    q = _normalise(query)
+    if not q:
+        return None
+    try:
+        with _equity_lock:
+            mapping = _equity_map
+        if not mapping:
+            mapping = load_equity_map()
+    except Exception:
+        return None
+    with _equity_lock:
+        syms = mapping["symbols"]
+        names = mapping["names"]
+        tokens = mapping["tokens"]
+        companies = mapping["companies"]
+        exact = syms.get(q)
+    if exact:
+        return exact
+    q_tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if t not in _IGNORED_WORDS]
+    best = None
+    if q_tokens:
+        for sym, name, norm_name, name_tokens in companies:
+            cleaned = [t for t in name_tokens if t not in _IGNORED_WORDS]
+            if not all(t in cleaned for t in q_tokens):
+                continue
+            score = sum(1 for t in q_tokens if t in cleaned and cleaned.count(t) >= 1)
+            if best is None or score > best[0] or (score == best[0] and len(cleaned) < len(best[2])):
+                best = (score, sym, cleaned)
+    if best:
+        return best[1]
+    for norm_name, sym in names.items():
+        if q in norm_name or norm_name in q:
+            return sym
+    return None
 
 
 def fetch_yahoo_quote(symbol):
@@ -357,11 +429,14 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /add SYMBOL, e.g. /add INFY")
+        await update.message.reply_text("Usage: /add STOCK, e.g. /add Infosys or /add INFY")
         return
-    sym = context.args[0].upper()
-    if not re.fullmatch(r"[A-Z0-9&\-]{1,20}", sym):
-        await update.message.reply_text(f"Invalid symbol: `{context.args[0]}`")
+    query = " ".join(context.args)
+    sym = resolve_symbol(query)
+    if not sym:
+        await update.message.reply_text(
+            f"Could not find `{query}` on NSE. Try the exact symbol (e.g. `/add INFY`).",
+            parse_mode=ParseMode.MARKDOWN)
         return
     with _watchlist_lock:
         if sym in _watchlist:
