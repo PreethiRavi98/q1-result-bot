@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import threading
@@ -179,6 +180,30 @@ YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleW
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1"))
 NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
 
+WATCHLIST_FILE = os.getenv("WATCHLIST_FILE", "watchlist.json")
+_watchlist_lock = threading.Lock()
+
+
+def load_watchlist():
+    try:
+        with open(WATCHLIST_FILE) as f:
+            return set(json.load(f))
+    except (OSError, ValueError):
+        return set()
+
+
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(sorted(watchlist), f)
+
+
+_watchlist = load_watchlist()
+
+
+def is_watched(symbol):
+    with _watchlist_lock:
+        return symbol in _watchlist
+
 
 def fetch_yahoo_quote(symbol):
     r = requests.get(
@@ -259,11 +284,13 @@ def monitor_loop(token):
             for item in ann:
                 if not is_financial_result(item):
                     continue
+                sym = item.get("symbol")
+                if _watchlist and sym not in _watchlist:
+                    continue
                 key = _announcement_key(item)
                 if key in _seen_seq_ids:
                     continue
                 _seen_seq_ids.add(key)
-                sym = item.get("symbol")
                 text = (item.get("attchmntText") or "")[:200]
                 msg = f"*New Q1 result: {sym}*\n{text}{NSE_DISCLAIMER}"
                 _send_telegram(token, NOTIFY_CHAT_ID, msg)
@@ -328,6 +355,52 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /add SYMBOL, e.g. /add INFY")
+        return
+    sym = context.args[0].upper()
+    if not re.fullmatch(r"[A-Z0-9&\-]{1,20}", sym):
+        await update.message.reply_text(f"Invalid symbol: `{context.args[0]}`")
+        return
+    with _watchlist_lock:
+        if sym in _watchlist:
+            await update.message.reply_text(f"*{sym}* is already on your watchlist.")
+            return
+        _watchlist.add(sym)
+        save_watchlist(_watchlist)
+    await update.message.reply_text(
+        f"Added *{sym}* to your watchlist. You'll be notified when it announces Q1 results.",
+        parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /remove SYMBOL, e.g. /remove INFY")
+        return
+    sym = context.args[0].upper()
+    with _watchlist_lock:
+        if sym not in _watchlist:
+            await update.message.reply_text(f"*{sym}* is not on your watchlist.")
+            return
+        _watchlist.discard(sym)
+        save_watchlist(_watchlist)
+    await update.message.reply_text(
+        f"Removed *{sym}* from your watchlist.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with _watchlist_lock:
+        symbols = sorted(_watchlist)
+    if not symbols:
+        await update.message.reply_text(
+            "Your watchlist is empty. Add stocks with /add SYMBOL.")
+        return
+    await update.message.reply_text(
+        "*Your watchlist*\n" + "\n".join(f"- {s}" for s in symbols),
+        parse_mode=ParseMode.MARKDOWN)
+
+
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -338,11 +411,17 @@ def main():
         "/q1 - today's Q1 result announcements\n"
         "/upcoming - upcoming Q1 result board meetings\n"
         "/losers - Q1-result companies trading down today\n"
+        "/add SYMBOL - watch a stock for Q1 result alerts\n"
+        "/remove SYMBOL - stop watching a stock\n"
+        "/watchlist - show your watched stocks\n"
         "/chatid - show your chat ID for auto-notifications")))
     app.add_handler(CommandHandler("q1", cmd_q1))
     app.add_handler(CommandHandler("upcoming", cmd_upcoming))
     app.add_handler(CommandHandler("losers", cmd_losers))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
+    app.add_handler(CommandHandler("add", cmd_add))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     start_health_server()
     threading.Thread(target=monitor_loop, args=(token,), daemon=True).start()
     print("Bot started. Polling for updates...")

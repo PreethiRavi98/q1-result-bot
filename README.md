@@ -7,7 +7,16 @@ A Telegram bot that reports Q1 (April-June quarter) results from NSE India.
 - `/q1` - Q1 financial results announced today on NSE
 - `/upcoming` - Upcoming Q1 result board meetings (dates yet to be held)
 - `/losers` - Q1-result companies trading down today (prices via Yahoo Finance)
+- `/add SYMBOL` - watch a stock; you'll be alerted when it announces Q1 results
+- `/remove SYMBOL` - stop watching a stock
+- `/watchlist` - list your watched stocks
 - `/chatid` - show your chat ID to use with auto-notifications
+
+## Watchlist
+
+When you `/add` stocks and set `NOTIFY_CHAT_ID`, the bot pushes notifications
+**only** for your watched stocks. If the watchlist is empty, it pushes all new
+Q1 results. The watchlist is stored in `watchlist.json` (`WATCHLIST_FILE`).
 
 ## Auto-notifications (push on new results)
 
